@@ -8,11 +8,17 @@ if (!projectId) {
   throw new Error("NEXT_PUBLIC_REOWN_PROJECT_ID is not set");
 }
 
+const appUrl =
+  process.env.NEXT_PUBLIC_APP_URL ??
+  (typeof window !== "undefined"
+    ? window.location.origin
+    : "https://shyv.netlify.app");
+
 export const metadata = {
   name: process.env.NEXT_PUBLIC_APP_NAME ?? "Telegram Crypto Pay",
   description:
     process.env.NEXT_PUBLIC_APP_DESCRIPTION ?? "Crypto payment mini app",
-  url: process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000",
+  url: appUrl,
   icons: ["https://avatars.githubusercontent.com/u/179229932"],
 };
 
