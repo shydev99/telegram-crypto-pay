@@ -15,7 +15,6 @@ export default async function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   const cookieHeader = (await headers()).get("cookie") ?? "";
   const initialState = cookieToInitialState(wagmiConfig, cookieHeader);
-
   return (
     <html lang="en">
       <body>

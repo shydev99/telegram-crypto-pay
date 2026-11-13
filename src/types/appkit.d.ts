@@ -6,12 +6,8 @@ declare global {
       "appkit-button": DetailedHTMLProps<HTMLAttributes<HTMLElement>, HTMLElement> & {
         size?: "sm" | "md" | "lg";
         label?: string;
-        loadingLabel?: string;
-        disabled?: boolean;
-        balance?: "show" | "hide";
       };
     }
   }
 }
-
 export {};

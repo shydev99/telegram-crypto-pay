@@ -15,11 +15,10 @@ export function Providers({
   initialState?: State;
 }) {
   const [queryClient] = useState(() => new QueryClient());
-
   return (
     <WagmiProvider config={wagmiConfig} initialState={initialState}>
       <QueryClientProvider client={queryClient}>
-        <TonConnectUIProvider manifestUrl="https://shyv.netlify.app/tonconnect-manifest.json">
+        <TonConnectUIProvider manifestUrl="https://telegram-crypto-pay.shyannedelana4.workers.dev/tonconnect-manifest.json">
           {children}
         </TonConnectUIProvider>
       </QueryClientProvider>
