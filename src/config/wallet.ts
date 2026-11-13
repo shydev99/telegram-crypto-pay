@@ -2,7 +2,7 @@
 import { WagmiAdapter } from "@reown/appkit-adapter-wagmi";
 import { mainnet, bsc, polygon } from "@reown/appkit/networks";
 
-export const projectId = process.env.NEXT_PUBLIC_REOWN_PROJECT_ID!;
+export const projectId = "805fb07ea7baed60aacb672825ad36a9";
 if (!projectId) throw new Error("NEXT_PUBLIC_REOWN_PROJECT_ID is not set");
 
 export const networks = [mainnet, bsc, polygon] as const;
@@ -22,3 +22,4 @@ export const wagmiAdapter = new WagmiAdapter({
 });
 
 export const wagmiConfig = wagmiAdapter.wagmiConfig;
+

