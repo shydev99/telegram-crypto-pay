@@ -123,9 +123,14 @@ export default function Home() {
   return (
     <main className="mx-auto flex min-h-screen max-w-md flex-col gap-4 bg-neutral-950 p-5 text-neutral-100">
       <header className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">TON Auto Collect</h1>
-        <span className="rounded bg-neutral-800 px-3 py-1 text-xs">TON</span>
+        <h1 className="text-xl font-semibold">Crypto Payment</h1>
+        <span className="rounded bg-neutral-800 px-3 py-1 text-xs">TON + EVM</span>
       </header>
+
+      <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
+        <h2 className="mb-3 font-medium">EVM wallet</h2>
+        <EvmConnectCard />
+      </section>
 
       <section className="rounded-xl border border-neutral-800 bg-neutral-900 p-4">
         <h2 className="mb-3 font-medium">Wallet</h2>
@@ -179,3 +184,25 @@ export default function Home() {
 }
 
 
+
+function EvmConnectCard() {
+  const { open } = useAppKit();
+  const { address, isConnected } = useAppKitAccount();
+  return (
+    <>
+      <p className="mb-3 break-all font-mono text-xs text-neutral-400">
+        {isConnected && address
+          ? `\...\`
+          : "Not connected"}
+      </p>
+      <button
+        type="button"
+        onClick={() => open()}
+        className="w-full rounded-lg bg-blue-600 px-4 py-3 font-semibold hover:bg-blue-500"
+      >
+        {isConnected ? "Switch EVM wallet" : "Connect EVM wallet"}
+      </button>
+      <EvmAssets />
+    </>
+  );
+}
