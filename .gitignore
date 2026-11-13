@@ -53,3 +53,6 @@ next-env.d.ts
 *.backup
 
 .dev.vars
+.open-next/
+.wrangler/
+opennext-build.log
